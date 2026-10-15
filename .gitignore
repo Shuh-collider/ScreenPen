@@ -1,0 +1,7 @@
+# Build output (download it from Releases or build with build.cmd)
+ScreenPen.exe
+tests/bin/
+
+# Personal files next to the exe
+ScreenPen.ini
+ScreenPen.log
