@@ -245,6 +245,27 @@ namespace ScreenPen
             }
         }
 
+        // Moves every drawing by the same offset (used when window coordinates change but the screen does not).
+        void OffsetDrawings(Vector shift)
+        {
+            var move = Matrix.Identity;
+            move.Translate(shift.X, shift.Y);
+            foreach (Stroke stroke in ink.Strokes) stroke.Transform(move, false);
+            foreach (UIElement child in ink.Children)
+            {
+                var path = child as Path;
+                ShapeKind kind;
+                Point a, b;
+                if (path != null && ReadShape(path, out kind, out a, out b))
+                {
+                    path.Data = BuildShape(kind, a + shift, b + shift, path.StrokeThickness);
+                    continue;
+                }
+                InkCanvas.SetLeft(child, InkCanvas.GetLeft(child) + shift.X);
+                InkCanvas.SetTop(child, InkCanvas.GetTop(child) + shift.Y);
+            }
+        }
+
         // The drawing under the point, newest first; handle = which of a shape's points, or -1.
         object DrawingAt(Point p, out int handle)
         {

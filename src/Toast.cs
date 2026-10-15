@@ -70,9 +70,12 @@ namespace ScreenPen
             };
             Content = card;
 
-            // Bottom-right corner of the primary monitor's work area.
+            // Bottom-right corner of the monitor with the mouse cursor: where the user is working.
             card.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            Rect area = SystemParameters.WorkArea;
+            var work = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).WorkingArea;
+            double scale;
+            using (var g = System.Drawing.Graphics.FromHwnd(IntPtr.Zero)) scale = g.DpiX / 96.0; // pixels -> WPF units
+            var area = new Rect(work.X / scale, work.Y / scale, work.Width / scale, work.Height / scale);
             Left = area.Right - card.DesiredSize.Width - 8;
             Top = area.Bottom - card.DesiredSize.Height - 8;
 

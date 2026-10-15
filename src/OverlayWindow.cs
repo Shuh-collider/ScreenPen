@@ -35,6 +35,7 @@ namespace ScreenPen
         const int CAPTUREBLT = 0x40000000; // include layered windows (our drawings) in the capture
 
         const int WM_HOTKEY = 0x0312;
+        const int WM_DISPLAYCHANGE = 0x007E;
         const int HOTKEY_TOGGLE_ID = 0x5150;
         const int HOTKEY_SCREENSHOT_ID = 0x5151;
         const int HOTKEY_LONG_ID = 0x5152;
@@ -93,6 +94,7 @@ namespace ScreenPen
         readonly Grid snapLayer = new Grid();
         readonly Image frozenImage = new Image();
         readonly RectangleGeometry selectionRect = new RectangleGeometry(new Rect(0, 0, 0, 0));
+        readonly Path selectionMask = new Path();
         readonly TextBlock selectionLabel = new TextBlock();
         readonly Border snapHint = new Border();
         System.Drawing.Bitmap frozenShot;
@@ -200,6 +202,12 @@ namespace ScreenPen
 
         IntPtr WndProc(IntPtr h, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
+            if (msg == WM_DISPLAYCHANGE)
+            {
+                // A monitor was added, removed or changed resolution; let Windows finish, then cover the screens again.
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(FitToScreens));
+                return IntPtr.Zero;
+            }
             if (msg != WM_HOTKEY) return IntPtr.Zero;
             int id = wParam.ToInt32();
             if (id == HOTKEY_TOGGLE_ID)
@@ -238,6 +246,7 @@ namespace ScreenPen
         public void ShowOverlay()
         {
             if (!toolbarPlaced) PlaceToolbar();
+            else KeepToolbarOnScreen();
             Show();
             Activate();
             Keyboard.Focus(root);
@@ -282,6 +291,57 @@ namespace ScreenPen
             double y = area.Top + Math.Max(10, (area.Height - toolbar.DesiredSize.Height) / 2);
             Canvas.SetLeft(toolbar, x);
             Canvas.SetTop(toolbar, y);
+        }
+
+        // Keeps the whole toolbar inside the working area of the monitor nearest to it.
+        void KeepToolbarOnScreen()
+        {
+            double x = Canvas.GetLeft(toolbar), y = Canvas.GetTop(toolbar);
+            if (double.IsNaN(x) || double.IsNaN(y)) return;
+            toolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            var box = new Rect(new Point(x, y), toolbar.DesiredSize);
+            Point position = ClampInto(WorkAreaAt(new Point(box.X + box.Width / 2, box.Y + box.Height / 2)), box);
+            Canvas.SetLeft(toolbar, position.X);
+            Canvas.SetTop(toolbar, position.Y);
+        }
+
+        // Top-left corner that puts the box inside the area (top-left aligned if the box is bigger).
+        static Point ClampInto(Rect area, Rect box)
+        {
+            double x = Math.Max(area.Left, Math.Min(box.X, area.Right - box.Width));
+            double y = Math.Max(area.Top, Math.Min(box.Y, area.Bottom - box.Height));
+            return new Point(x, y);
+        }
+
+        // Monitors were added, removed or changed resolution: cover the new virtual screen. The drawings stay
+        // where they were on the screen, and the toolbar is brought back onto a monitor.
+        void FitToScreens()
+        {
+            var screen = System.Windows.Forms.SystemInformation.VirtualScreen;
+            double left = screen.X / dpiScale, top = screen.Y / dpiScale;
+            double width = screen.Width / dpiScale, height = screen.Height / dpiScale;
+            if (left == Left && top == Top && width == Width && height == Height) return;
+            Log.Write("Screens changed: virtual screen {0}", screen);
+
+            // Window coordinates start at the virtual screen's corner; if the corner moved, move everything back.
+            var shift = new Vector(Left - left, Top - top);
+            Left = left;
+            Top = top;
+            Width = width;
+            Height = height;
+            var whole = new RectangleGeometry(new Rect(0, 0, width, height));
+            flashlight.Data = new CombinedGeometry(GeometryCombineMode.Exclude, whole, flashHole);
+            selectionMask.Data = new CombinedGeometry(GeometryCombineMode.Exclude, whole, selectionRect);
+            if (shift.X != 0 || shift.Y != 0)
+            {
+                OffsetDrawings(shift);
+                Canvas.SetLeft(toolbar, Canvas.GetLeft(toolbar) + shift.X);
+                Canvas.SetTop(toolbar, Canvas.GetTop(toolbar) + shift.Y);
+            }
+            KeepToolbarOnScreen();
+            HidePalette();
+            if (stripOpen) ToggleStrip(); // reopening places it on a monitor again
+            if (passThrough) RefreshEditLayer();
         }
 
         // ---------- toolbar ----------
@@ -445,6 +505,7 @@ namespace ScreenPen
         {
             draggingToolbar = false;
             ((UIElement)sender).ReleaseMouseCapture();
+            KeepToolbarOnScreen(); // dropped partly off-screen: slide it back fully onto the monitor
         }
 
         // ---------- colors and sizes ----------
@@ -820,13 +881,11 @@ namespace ScreenPen
             snapLayer.Children.Add(frozenImage);
 
             // Darken everything except the selected rectangle.
-            snapLayer.Children.Add(new Path
-            {
-                Fill = Frozen(new SolidColorBrush(Color.FromArgb(120, 0, 0, 0))),
-                Data = new CombinedGeometry(GeometryCombineMode.Exclude,
-                    new RectangleGeometry(new Rect(0, 0, Width, Height)), selectionRect),
-                IsHitTestVisible = false
-            });
+            selectionMask.Fill = Frozen(new SolidColorBrush(Color.FromArgb(120, 0, 0, 0)));
+            selectionMask.Data = new CombinedGeometry(GeometryCombineMode.Exclude,
+                new RectangleGeometry(new Rect(0, 0, Width, Height)), selectionRect);
+            selectionMask.IsHitTestVisible = false;
+            snapLayer.Children.Add(selectionMask);
             snapLayer.Children.Add(new Path
             {
                 Data = selectionRect,
@@ -1148,9 +1207,20 @@ namespace ScreenPen
 
         Rect MonitorRectAt(Point p)
         {
+            return ToWindowRect(ScreenAt(p).Bounds);
+        }
+
+        // Working area (without the taskbar) of the monitor at, or nearest to, a window point.
+        Rect WorkAreaAt(Point p)
+        {
+            return ToWindowRect(ScreenAt(p).WorkingArea);
+        }
+
+        System.Windows.Forms.Screen ScreenAt(Point p)
+        {
             var screen = System.Windows.Forms.SystemInformation.VirtualScreen;
             var pixel = new System.Drawing.Point((int)(p.X * dpiScale) + screen.X, (int)(p.Y * dpiScale) + screen.Y);
-            return ToWindowRect(System.Windows.Forms.Screen.FromPoint(pixel).Bounds);
+            return System.Windows.Forms.Screen.FromPoint(pixel);
         }
 
         // ---------- keyboard ----------
