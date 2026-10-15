@@ -110,7 +110,7 @@ namespace ScreenPen
 
         readonly Drawing.Rectangle region; // screen pixels
         readonly double dpiScale;
-        readonly Func<string> newFilePath;
+        readonly Func<Drawing.Bitmap, string> save; // saves the result; returns the file, or null if the user cancelled
         readonly Action<string, string, string> finished; // saved path, error, notification title
         readonly DispatcherTimer timer = new DispatcherTimer();
         readonly List<Drawing.Bitmap> pieces = new List<Drawing.Bitmap>();
@@ -135,12 +135,12 @@ namespace ScreenPen
         bool done;
         string failure;
 
-        public ScrollCapture(Drawing.Rectangle region, double dpiScale, Func<string> newFilePath,
+        public ScrollCapture(Drawing.Rectangle region, double dpiScale, Func<Drawing.Bitmap, string> save,
             Action<string, string, string> finished)
         {
             this.region = region;
             this.dpiScale = dpiScale;
-            this.newFilePath = newFilePath;
+            this.save = save;
             this.finished = finished;
             scrollbarMargin = Math.Min((int)(24 * dpiScale), region.Width / 4);
             maxHeight = Math.Min(20000, MaxPixels / Math.Max(1, region.Width));
@@ -699,18 +699,9 @@ namespace ScreenPen
                 {
                     using (Drawing.Bitmap result = Compose())
                     {
-                        path = newFilePath();
-                        System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path));
-                        result.Save(path, Drawing.Imaging.ImageFormat.Png);
-                        try
-                        {
-                            System.Windows.Forms.Clipboard.SetImage(result);
-                        }
-                        catch (ExternalException)
-                        {
-                            // Clipboard is held by another app; the file is saved anyway.
-                        }
-                        if (pieces.Count == 0) title = "Прокрутка не сработала — сохранён обычный скриншот";
+                        path = save(result);
+                        if (path == null) title = string.Format("Длинный скриншот {0:N0} px не сохранён", result.Height);
+                        else if (pieces.Count == 0) title = "Прокрутка не сработала — сохранён обычный скриншот";
                         else if (reason == "limit") title = string.Format("Длинный скриншот {0:N0} px (достигнут предел)", result.Height);
                         else if (reason == "partial") title = string.Format("Длинный скриншот {0:N0} px — дальше склеить не удалось", result.Height);
                         else title = string.Format("Длинный скриншот сохранён: {0:N0} px", result.Height);

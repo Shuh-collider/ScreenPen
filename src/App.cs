@@ -63,7 +63,12 @@ namespace ScreenPen
                     MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
-            if (path == null) return;
+            if (path == null)
+            {
+                // The "save as" dialog was cancelled.
+                if (title != null) Toast.Notify(title, "Он остался в буфере обмена — вставьте Ctrl+V.", null);
+                return;
+            }
             Toast.Notify(title ?? "Скриншот сохранён",
                 "Скопирован в буфер обмена — вставьте Ctrl+V.\n" + Path.GetFileName(path) + "\nНажмите, чтобы открыть папку.",
                 () => OpenScreenshotFolder(path));

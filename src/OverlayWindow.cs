@@ -102,6 +102,7 @@ namespace ScreenPen
         bool longMode;               // the selection is for a long (scrolling) screenshot
         ScrollCapture scrollCapture; // running long screenshot
         Point selectionStart;
+        static string lastSaveFolder; // where the previous screenshot was saved
 
         public bool AllowClose { get; set; }
 
@@ -1044,38 +1045,119 @@ namespace ScreenPen
 
         void CompleteScreenshot(Rect area)
         {
-            string savedPath = null, error = null;
+            string savedPath = null, error = null, title = null;
+            System.Drawing.Bitmap crop = null;
+            var pixels = new System.Drawing.Rectangle(
+                (int)Math.Round(area.X * dpiScale), (int)Math.Round(area.Y * dpiScale),
+                (int)Math.Round(area.Width * dpiScale), (int)Math.Round(area.Height * dpiScale));
             try
             {
-                var pixels = new System.Drawing.Rectangle(
-                    (int)Math.Round(area.X * dpiScale), (int)Math.Round(area.Y * dpiScale),
-                    (int)Math.Round(area.Width * dpiScale), (int)Math.Round(area.Height * dpiScale));
                 pixels.Intersect(new System.Drawing.Rectangle(0, 0, frozenShot.Width, frozenShot.Height));
                 if (pixels.Width > 0 && pixels.Height > 0)
-                {
-                    using (var crop = frozenShot.Clone(pixels, frozenShot.PixelFormat))
-                    {
-                        System.IO.Directory.CreateDirectory(ScreenshotFolder);
-                        savedPath = UniqueScreenshotPath();
-                        crop.Save(savedPath, System.Drawing.Imaging.ImageFormat.Png);
-                        try
-                        {
-                            System.Windows.Forms.Clipboard.SetImage(crop);
-                        }
-                        catch (ExternalException)
-                        {
-                            // Clipboard is held by another app; the file is saved anyway.
-                        }
-                    }
-                }
+                    crop = frozenShot.Clone(pixels, frozenShot.PixelFormat);
             }
             catch (Exception ex)
             {
                 error = ex.Message;
             }
-            EndScreenshot();
+            EndScreenshot(); // the dialog is asked over the real screen, not the frozen one
+            if (crop != null)
+            {
+                var screen = System.Windows.Forms.SystemInformation.VirtualScreen;
+                pixels.Offset(screen.X, screen.Y);
+                try
+                {
+                    savedPath = SaveScreenshot(crop, pixels);
+                    if (savedPath == null) title = "Скриншот не сохранён";
+                }
+                catch (Exception ex)
+                {
+                    error = ex.Message;
+                }
+                finally
+                {
+                    crop.Dispose();
+                }
+            }
             if (stripOpen && showingScreenshots) RefreshStrip();
-            RaiseScreenshotFinished(savedPath, error);
+            RaiseScreenshotFinished(savedPath, error, title);
+        }
+
+        // Copies the screenshot to the clipboard and asks where to save it.
+        // Returns the saved file, or null when the dialog was cancelled (the image stays in the clipboard).
+        string SaveScreenshot(System.Drawing.Bitmap image, System.Drawing.Rectangle shotOnScreen)
+        {
+            try
+            {
+                System.Windows.Forms.Clipboard.SetImage(image);
+            }
+            catch (ExternalException)
+            {
+                // Clipboard is held by another app; the file can be saved anyway.
+            }
+            string path = AskSavePath(shotOnScreen);
+            if (path != null)
+            {
+                image.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                lastSaveFolder = System.IO.Path.GetDirectoryName(path);
+            }
+            return path;
+        }
+
+        // "Save as" dialog on the monitor with the screenshot, above the overlay and other windows.
+        // Opens in the folder of the previous screenshot (ScreenshotFolder the first time).
+        string AskSavePath(System.Drawing.Rectangle shotOnScreen)
+        {
+            string folder = lastSaveFolder;
+            if (folder == null || !System.IO.Directory.Exists(folder))
+            {
+                folder = ScreenshotFolder;
+                System.IO.Directory.CreateDirectory(folder);
+            }
+            var dialog = new Microsoft.Win32.SaveFileDialog
+            {
+                Title = "Сохранить скриншот",
+                InitialDirectory = folder,
+                FileName = System.IO.Path.GetFileName(UniqueScreenshotPath(folder)),
+                Filter = "Изображение PNG (*.png)|*.png",
+                DefaultExt = ".png",
+                AddExtension = true,
+                OverwritePrompt = true
+            };
+            // An invisible owner covering that monitor: the dialog opens over it, on top, with the keyboard.
+            var center = new System.Drawing.Point(shotOnScreen.X + shotOnScreen.Width / 2, shotOnScreen.Y + shotOnScreen.Height / 2);
+            var work = System.Windows.Forms.Screen.FromPoint(center).WorkingArea;
+            var owner = new Window
+            {
+                WindowStyle = WindowStyle.None,
+                AllowsTransparency = true,
+                Background = Brushes.Transparent,
+                ResizeMode = ResizeMode.NoResize,
+                ShowInTaskbar = false,
+                Topmost = true,
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                Left = work.X / dpiScale,
+                Top = work.Y / dpiScale,
+                Width = work.Width / dpiScale,
+                Height = work.Height / dpiScale
+            };
+            bool? ok;
+            try
+            {
+                owner.Show();
+                owner.Activate();
+                ok = dialog.ShowDialog(owner);
+            }
+            finally
+            {
+                owner.Close();
+            }
+            if (IsVisible)
+            {
+                Activate();
+                Keyboard.Focus(root);
+            }
+            return ok == true ? dialog.FileName : null;
         }
 
         void EndScreenshot()
@@ -1136,7 +1218,7 @@ namespace ScreenPen
                     RaiseScreenshotFinished(null, "Не удалось определить область для прокрутки. Выделите её рамкой.");
                     return;
                 }
-                scrollCapture = new ScrollCapture(region, dpiScale, UniqueScreenshotPath, (path, error, title) =>
+                scrollCapture = new ScrollCapture(region, dpiScale, image => SaveScreenshot(image, region), (path, error, title) =>
                 {
                     scrollCapture = null;
                     if (showAfter) ShowOverlay();
@@ -1148,12 +1230,12 @@ namespace ScreenPen
             timer.Start();
         }
 
-        static string UniqueScreenshotPath()
+        static string UniqueScreenshotPath(string folder)
         {
             string name = "ScreenPen_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
-            string path = System.IO.Path.Combine(ScreenshotFolder, name + ".png");
+            string path = System.IO.Path.Combine(folder, name + ".png");
             for (int i = 2; System.IO.File.Exists(path); i++)
-                path = System.IO.Path.Combine(ScreenshotFolder, name + "_" + i + ".png");
+                path = System.IO.Path.Combine(folder, name + "_" + i + ".png");
             return path;
         }
 
